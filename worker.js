@@ -143,7 +143,7 @@ const ADAPTERS = {
     configured: true,
     auth: 'oauth',
     oauth: {
-      authorizeUrl: 'https://www.clover.com/oauth/v2/authorize',
+      authorizeUrl: 'https://www.clover.com/oauth/authorize', /* private-app install link (not /oauth/v2/) - see docs.clover.com/dev/docs/gdp-work-with-private-apps */
       tokenUrl: 'https://api.clover.com/oauth/v2/token',
       scopes: '', /* Clover uses app-level Read/Write permissions set in the Developer
                      Dashboard (Orders: Read, Payments: Read) rather than an OAuth scope
