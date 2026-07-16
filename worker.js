@@ -140,12 +140,40 @@ const ADAPTERS = {
      connect.squareupsandbox.com.
   */
   pos: {
-    configured: false,
-    auth: null,
-    oauth: {},
-    async status(env, h) { return { connected: false }; },
-    async fetchRange(env, h, q) { throw new NotConfigured('pos'); },
-    async fetchMonthly(env, h, q) { throw new NotConfigured('pos'); }
+    configured: true,
+    auth: 'oauth',
+    oauth: {
+      authorizeUrl: 'https://www.clover.com/oauth/v2/authorize',
+      tokenUrl: 'https://api.clover.com/oauth/v2/token',
+      scopes: '', /* Clover uses app-level Read/Write permissions set in the Developer
+                     Dashboard (Orders: Read, Payments: Read) rather than an OAuth scope
+                     string - confirm those two are ticked (and nothing else) when the
+                     app is created. */
+      clientIdSecret: 'POS_CLIENT_ID',
+      clientSecretSecret: 'POS_CLIENT_SECRET',
+      tokenAuth: 'json' /* Clover's token endpoint wants a JSON body, not form-urlencoded */
+    },
+    async status(env, h) {
+      const tokens = await h.getTokens();
+      if (!tokens || !tokens.merchant_id) return { connected: false };
+      const m = await h.fetchJson(CLOVER_API + '/v3/merchants/' + tokens.merchant_id);
+      return { connected: true, org: (m && m.name) || tokens.merchant_id, sandbox: /test|sandbox|demo/i.test((m && m.name) || '') };
+    },
+    async fetchRange(env, h, q) {
+      const mId = await cloverMerchantId(h);
+      return { count: await cloverCountPayments(h, mId, q.from, q.to) };
+    },
+    async fetchMonthly(env, h, q) {
+      const mId = await cloverMerchantId(h);
+      const months = monthList(q.fromMonth, q.toMonth);
+      const out = { months, count: [] };
+      for (const mo of months) {
+        const [y, m] = mo.split('-').map(Number);
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        out.count.push(await cloverCountPayments(h, mId, mo + '-01', mo + '-' + String(lastDay).padStart(2, '0')));
+      }
+      return out;
+    }
   },
 
   /* >>> ADAPTER 3: ROSTERING (optional - only if the owner has one)
@@ -259,6 +287,67 @@ function lastDayOfMonth(mo) {
   return mo + '-' + String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, '0');
 }
 
+/* ----------------------------------------------------------------------------
+   Clover helpers (pos adapter). Supplies ONE number - the count of completed
+   transactions (kpi-spec.md #2) - never a dollar figure. NA/global host assumed
+   (api.clover.com); verify against the owner's actual region at connect time
+   (EU: api.eu.clover.com, LATAM: api.la.clover.com) and adjust CLOVER_API/
+   CLOVER_AUTH below if the merchant is on a different cluster.
+---------------------------------------------------------------------------- */
+const CLOVER_AUTH = 'https://www.clover.com';
+const CLOVER_API = 'https://api.clover.com';
+async function cloverMerchantId(h) {
+  const tokens = await h.getTokens();
+  if (!tokens || !tokens.merchant_id) { const e = new Error('not connected'); e.status = 401; throw e; }
+  return tokens.merchant_id;
+}
+/* Clover caps a single orders/payments query at a 90-day window - chunk any
+   longer range and stitch the counts together. */
+function chunkDateRange(fromStr, toStr, maxDays) {
+  const out = [];
+  let cur = fromStr;
+  const toDate = new Date(toStr + 'T00:00:00Z');
+  while (true) {
+    const curDate = new Date(cur + 'T00:00:00Z');
+    const candidate = new Date(curDate.getTime() + maxDays * 86400000);
+    const chunkEndDate = candidate < toDate ? candidate : toDate;
+    const chunkEnd = chunkEndDate.toISOString().slice(0, 10);
+    out.push([cur, chunkEnd]);
+    if (chunkEnd === toStr) break;
+    cur = new Date(chunkEndDate.getTime() + 86400000).toISOString().slice(0, 10);
+  }
+  return out;
+}
+function dayRangeMs(fromStr, toStr) {
+  const [fy, fm, fd] = fromStr.split('-').map(Number);
+  const [ty, tm, td] = toStr.split('-').map(Number);
+  return { start: Date.UTC(fy, fm - 1, fd, 0, 0, 0), end: Date.UTC(ty, tm - 1, td, 0, 0, 0) + 86400000 };
+}
+/* Counts completed (successful) payments in [fromStr, toStr] inclusive.
+   Refunds are separate linked records - they never remove the original
+   payment, so they never reduce this count (kpi-spec.md: refunds excluded
+   from the count, not subtracted from it). */
+async function cloverCountPayments(h, mId, fromStr, toStr) {
+  let total = 0;
+  for (const [cf, ct] of chunkDateRange(fromStr, toStr, 89)) {
+    const { start, end } = dayRangeMs(cf, ct);
+    let offset = 0;
+    const limit = 1000;
+    while (true) {
+      const url = CLOVER_API + '/v3/merchants/' + mId + '/payments'
+        + '?filter=' + encodeURIComponent('clientCreatedTime>=' + start)
+        + '&filter=' + encodeURIComponent('clientCreatedTime<' + end)
+        + '&limit=' + limit + '&offset=' + offset;
+      const res = await h.fetchJson(url);
+      const elements = (res && res.elements) || [];
+      for (const p of elements) if (p.result === 'SUCCESS') total++;
+      if (elements.length < limit) break;
+      offset += limit;
+    }
+  }
+  return total;
+}
+
 /* ============================================================================
    Everything below is the shell. You should rarely need to edit it.
 ============================================================================ */
@@ -303,6 +392,14 @@ async function lastSync(env, source) {
 function tokenRequestInit(cfg, params, env) {
   const id = env[cfg.clientIdSecret] || '';
   const secret = env[cfg.clientSecretSecret] || '';
+  if ((cfg.tokenAuth || 'post') === 'json') {
+    /* Clover's token endpoint wants a JSON body with client_id/secret inline. */
+    return {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: id, client_secret: secret, ...params })
+    };
+  }
   const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
   const body = new URLSearchParams(params);
   if ((cfg.tokenAuth || 'post') === 'basic') {
@@ -595,12 +692,19 @@ async function authCallback(env, source, url) {
     return new Response('The connection couldn’t be finished (the tool said no: ' + res.status + '). Your AI will check the app settings - the usual cause is a redirect address that doesn’t match exactly.', { status: 502 });
   }
   const t = await res.json();
+  /* Extra callback params some providers send alongside `code` (e.g. Clover's
+     merchant_id) - captured generically so any adapter can use them. */
+  const extra = {};
+  url.searchParams.forEach((v, k) => { if (k !== 'code' && k !== 'state') extra[k] = v; });
   await saveTokens(env, source, {
     access_token: t.access_token,
     refresh_token: t.refresh_token || null,
     token_type: t.token_type || 'Bearer',
-    expires_at: Date.now() + ((t.expires_in || 1800) * 1000),
-    obtained_at: new Date().toISOString()
+    /* Most providers send expires_in (seconds); some (Clover) send an absolute
+       access_token_expiration instead - honour whichever is present. */
+    expires_at: t.access_token_expiration ? Number(t.access_token_expiration) : Date.now() + ((t.expires_in || 1800) * 1000),
+    obtained_at: new Date().toISOString(),
+    ...extra
   });
   /* After token storage, adapters' status() should resolve org name etc. */
   return Response.redirect(url.origin + '/', 302);
