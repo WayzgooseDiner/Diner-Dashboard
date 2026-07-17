@@ -143,8 +143,8 @@ const ADAPTERS = {
     configured: true,
     auth: 'oauth',
     oauth: {
-      authorizeUrl: 'https://www.clover.com/oauth/authorize', /* private-app install link (not /oauth/v2/) - see docs.clover.com/dev/docs/gdp-work-with-private-apps */
-      tokenUrl: 'https://api.clover.com/oauth/v2/token',
+      authorizeUrl: 'https://ap.clover.com/oauth/authorize', /* AU/APAC merchants are on the ap.clover.com cluster, not www.clover.com (NA) - confirmed with Clover support */
+      tokenUrl: 'https://api.ap.clover.com/oauth/v2/token',
       scopes: '', /* Clover uses app-level Read/Write permissions set in the Developer
                      Dashboard (Orders: Read, Payments: Read) rather than an OAuth scope
                      string - confirm those two are ticked (and nothing else) when the
@@ -294,8 +294,8 @@ function lastDayOfMonth(mo) {
    (EU: api.eu.clover.com, LATAM: api.la.clover.com) and adjust CLOVER_API/
    CLOVER_AUTH below if the merchant is on a different cluster.
 ---------------------------------------------------------------------------- */
-const CLOVER_AUTH = 'https://www.clover.com';
-const CLOVER_API = 'https://api.clover.com';
+const CLOVER_AUTH = 'https://ap.clover.com';
+const CLOVER_API = 'https://api.ap.clover.com';
 async function cloverMerchantId(h) {
   const tokens = await h.getTokens();
   if (!tokens || !tokens.merchant_id) { const e = new Error('not connected'); e.status = 401; throw e; }
