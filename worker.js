@@ -197,7 +197,11 @@ const ADAPTERS = {
       });
       if (res.status === 401 || res.status === 403) { const e = new Error('rostering auth'); e.status = res.status; throw e; }
       if (!res.ok && res.status !== 204) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
-      return { connected: true, org: null };
+      /* Tanda's token is scoped to exactly one account by nature (created while
+         logged into it) - no multi-org picker like Xero, but the Connections
+         screen still needs a non-null org value to show the confirm-your-
+         business prompt (kpi-spec.md: every connected source gets confirmed). */
+      return { connected: true, org: 'your Tanda account' };
     },
     async fetchRange(env, h, q) {
       return { cost: await tandaRosteredCost(env, q.from, q.to) };
