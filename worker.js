@@ -186,12 +186,32 @@ const ADAPTERS = {
      Example (Deputy): pasted permanent token (secret ROSTERING_API_TOKEN).
   */
   rostering: {
-    configured: false,
-    auth: null,
+    configured: true,
+    auth: 'token', /* a pasted personal access token, not OAuth - secret: ROSTERING_API_TOKEN */
     oauth: {},
-    async status(env, h) { return { connected: false }; },
-    async fetchRange(env, h, q) { throw new NotConfigured('rostering'); },
-    async fetchMonthly(env, h, q) { return { months: [], cost: [] }; }
+    async status(env, h) {
+      if (!env.ROSTERING_API_TOKEN) return { connected: false };
+      const today = new Date().toISOString().slice(0, 10);
+      const res = await fetch('https://my.tanda.co/api/v2/rosters/on/' + today + '?show_costs=true', {
+        headers: { Authorization: 'Bearer ' + env.ROSTERING_API_TOKEN }
+      });
+      if (res.status === 401 || res.status === 403) { const e = new Error('rostering auth'); e.status = res.status; throw e; }
+      if (!res.ok && res.status !== 204) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+      return { connected: true, org: null };
+    },
+    async fetchRange(env, h, q) {
+      return { cost: await tandaRosteredCost(env, q.from, q.to) };
+    },
+    async fetchMonthly(env, h, q) {
+      const months = monthList(q.fromMonth, q.toMonth);
+      const out = { months, cost: [] };
+      for (const mo of months) {
+        const [y, m] = mo.split('-').map(Number);
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        out.cost.push(await tandaRosteredCost(env, mo + '-01', mo + '-' + String(lastDay).padStart(2, '0')));
+      }
+      return out;
+    }
   }
 };
 
@@ -344,6 +364,47 @@ async function cloverCountPayments(h, mId, fromStr, toStr) {
       if (elements.length < limit) break;
       offset += limit;
     }
+  }
+  return total;
+}
+
+/* ----------------------------------------------------------------------------
+   Tanda helpers (rostering adapter, optional). Supplies rostered labour COST
+   only, for the PROJECTED Wage % - the actual Wage % already comes from Xero.
+   Auth is a pasted personal access token (my.tanda.co -> API -> access
+   tokens), Bearer header - not OAuth, so calls here set the header directly
+   rather than going through h.fetchJson's oauth path.
+---------------------------------------------------------------------------- */
+function tandaWeekStarts(fromStr, toStr) {
+  const out = [];
+  let cur = fromStr;
+  const toMs = new Date(toStr + 'T00:00:00Z').getTime();
+  while (new Date(cur + 'T00:00:00Z').getTime() <= toMs) {
+    out.push(cur);
+    cur = new Date(new Date(cur + 'T00:00:00Z').getTime() + 7 * 86400000).toISOString().slice(0, 10);
+  }
+  return out;
+}
+/* Tanda's roster/week endpoint returns one pre-summed `cost` field per whole
+   week - this walks week-by-week across the range and adds them up. Weeks
+   that don't align exactly to the requested from/to are a known approximation,
+   acceptable here because this feeds only the PROJECTED figure (always shown
+   labelled projected, beside the real Wage % from Xero - kpi-spec.md). */
+async function tandaRosteredCost(env, fromStr, toStr) {
+  const token = env.ROSTERING_API_TOKEN;
+  if (!token) { const e = new Error('rostering not connected'); e.status = 401; throw e; }
+  let total = 0;
+  const seen = new Set();
+  for (const d of tandaWeekStarts(fromStr, toStr)) {
+    const res = await fetch('https://my.tanda.co/api/v2/rosters/on/' + d + '?show_costs=true', {
+      headers: { Authorization: 'Bearer ' + token }
+    });
+    if (res.status === 204) continue;
+    if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+    const roster = await res.json();
+    const key = roster && (roster.id || roster.start);
+    if (key) { if (seen.has(key)) continue; seen.add(key); }
+    total += (roster && roster.cost) || 0;
   }
   return total;
 }
