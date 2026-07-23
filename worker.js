@@ -173,6 +173,35 @@ const ADAPTERS = {
         out.count.push(await cloverCountPayments(h, mId, mo + '-01', mo + '-' + String(lastDay).padStart(2, '0')));
       }
       return out;
+    },
+    /* Fallback ladder rung (Path C - guided upload): while live OAuth is
+       fighting the owner, the owner can export an Orders/Sales report from
+       their everyday Clover Dashboard (Sales activity -> Orders -> Export,
+       or Reports -> Sales report -> Export) and drop it on the Connections
+       screen's upload panel instead. Same honesty rules: voids and refunds
+       excluded, never a dollar figure. Column names are auto-detected since
+       Clover's exact export headers vary by report; if none of the expected
+       columns are found, no rows are parsed (safe failure, not a bad count). */
+    async parseExport(env, h, raw) {
+      const lines = String(raw.text || '').split(/\r?\n/).filter((l) => l.trim().length);
+      if (!lines.length) return [];
+      const headers = cloverCsvLine(lines[0]).map((s) => s.trim().toLowerCase());
+      const dateIdx = cloverFindCol(headers, ['date', 'order date', 'transaction date', 'created time', 'created', 'time']);
+      const typeIdx = cloverFindCol(headers, ['transaction type', 'type', 'state', 'status']);
+      if (dateIdx === -1) return [];
+      const counts = {};
+      for (let i = 1; i < lines.length; i++) {
+        const cells = cloverCsvLine(lines[i]);
+        if (!cells.length || !cells[dateIdx]) continue;
+        const d = cloverNormaliseDate(cells[dateIdx]);
+        if (!d) continue;
+        if (typeIdx !== -1) {
+          const t = (cells[typeIdx] || '').toLowerCase();
+          if (t.indexOf('void') !== -1 || t.indexOf('refund') !== -1) continue; /* excluded per kpi-spec.md */
+        }
+        counts[d] = (counts[d] || 0) + 1;
+      }
+      return Object.keys(counts).map((d) => ({ date: d, count: counts[d] }));
     }
   },
 
@@ -411,6 +440,41 @@ async function tandaRosteredCost(env, fromStr, toStr) {
     total += (roster && roster.cost) || 0;
   }
   return total;
+}
+
+/* Small CSV helpers for the Clover guided-upload rung - handles quoted
+   commas, and reads several common date formats down to YYYY-MM-DD. */
+function cloverCsvLine(line) {
+  const out = [];
+  let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQ) {
+      if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (c === '"') { inQ = false; }
+      else { cur += c; }
+    } else if (c === '"') { inQ = true; }
+    else if (c === ',') { out.push(cur); cur = ''; }
+    else { cur += c; }
+  }
+  out.push(cur);
+  return out;
+}
+function cloverFindCol(lowerHeaders, candidates) {
+  for (const cand of candidates) {
+    const i = lowerHeaders.indexOf(cand);
+    if (i !== -1) return i;
+  }
+  return -1;
+}
+function cloverNormaliseDate(raw) {
+  const s = String(raw).trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s); /* ISO / already YYYY-MM-DD(THH:MM) */
+  if (m) return m[1] + '-' + m[2] + '-' + m[3];
+  m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s); /* MM/DD/YYYY */
+  if (m) return m[3] + '-' + m[1].padStart(2, '0') + '-' + m[2].padStart(2, '0');
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
 
 /* ============================================================================
